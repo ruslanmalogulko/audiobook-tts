@@ -586,10 +586,31 @@ def render_chapter(narrator: Narrator, chapter: dict, out_wav: Path, limit: int 
 
 ROLE_COLORS = {"narration": (242, 242, 242), "male": (140, 200, 255), "female": (255, 160, 200), "title": (255, 216, 128)}
 ROLE_LABELS = {"narration": "рассказчик", "male": "мужской голос", "female": "женский голос", "title": ""}
-TEXT_FONT = "/System/Library/Fonts/Supplemental/PTSerif.ttc"
-LABEL_FONT = "/System/Library/Fonts/Supplemental/PTSans.ttc"
+def find_font(env_var: str, candidates: list) -> str:
+    """Шрифт с кириллицей: переменная окружения, иначе первый найденный из списка (macOS, Linux)."""
+    import os
+
+    for path in [os.environ.get(env_var), *candidates]:
+        if path and Path(path).exists():
+            return path
+    raise SystemExit(f"Не найден шрифт с кириллицей для видео. Укажите путь в {env_var}=/path/to/font.ttf")
+
+
+TEXT_FONT_CANDIDATES = [
+    "/System/Library/Fonts/Supplemental/PTSerif.ttc",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+    "/usr/share/fonts/TTF/DejaVuSerif.ttf",
+    "C:/Windows/Fonts/georgia.ttf",
+]
+LABEL_FONT_CANDIDATES = [
+    "/System/Library/Fonts/Supplemental/PTSans.ttc",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "C:/Windows/Fonts/arial.ttf",
+]
 VIDEO_W, VIDEO_H = 1280, 720
 TEXT_BOX = (560, 110, 1220, 650)  # x0, y0, x1, y1 области текста справа от обложки
+TEXT_BOX_NO_COVER = (160, 110, 1120, 650)  # без обложки текст по центру кадра
 VIDEO_FPS = 5
 
 
@@ -634,16 +655,17 @@ def wrap_text(draw, text: str, font, width: int):
     return [*lines, line] if line else lines
 
 
-def draw_frame(background, chapter_title: str, text: str, role: str):
+def draw_frame(background, chapter_title: str, text: str, role: str, text_box=TEXT_BOX):
     from PIL import ImageDraw, ImageFont
 
     frame = background.copy()
     draw = ImageDraw.Draw(frame)
-    x0, y0, x1, y1 = TEXT_BOX
-    label_font = ImageFont.truetype(LABEL_FONT, 22)
+    x0, y0, x1, y1 = text_box
+    label_font = ImageFont.truetype(find_font("AUDIOBOOK_LABEL_FONT", LABEL_FONT_CANDIDATES), 22)
+    text_font_path = find_font("AUDIOBOOK_TEXT_FONT", TEXT_FONT_CANDIDATES)
     draw.text((x0, 50), chapter_title.upper()[:60], font=label_font, fill=(170, 170, 170))
     for size in (38, 34, 30, 27, 24):  # уменьшаем шрифт, пока текст не влезет
-        font = ImageFont.truetype(TEXT_FONT, size)
+        font = ImageFont.truetype(text_font_path, size)
         lines = wrap_text(draw, text, font, x1 - x0)
         line_height = int(size * 1.4)
         if len(lines) * line_height <= y1 - y0 - 40:
@@ -656,6 +678,14 @@ def draw_frame(background, chapter_title: str, text: str, role: str):
         draw.text((x0, y), line, font=font, fill=ROLE_COLORS[role])
         y += line_height
     return frame
+
+
+def video_encoder_args():
+    """Аппаратный H.264 на Mac (VideoToolbox), иначе libx264."""
+    encoders = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], capture_output=True, text=True).stdout
+    if "h264_videotoolbox" in encoders:
+        return ["-c:v", "h264_videotoolbox", "-b:v", "400k"]
+    return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "30", "-tune", "stillimage"]
 
 
 def build_video(audio_path: Path, cues: list, spans: list, total: float, cover, out_path: Path, work: Path):
@@ -673,7 +703,8 @@ def build_video(audio_path: Path, cues: list, spans: list, total: float, cover, 
         end = cues[i + 1][0] if i + 1 < len(cues) else total
         title = next((t for t, a, b in spans if a <= start < b), spans[-1][0])
         frame_path = frames_dir / f"{i:06d}.jpg"
-        draw_frame(background, title, text, role).save(frame_path, quality=85)
+        text_box = TEXT_BOX if cover else TEXT_BOX_NO_COVER
+        draw_frame(background, title, text, role, text_box).save(frame_path, quality=85)
         concat += [f"file '{frame_path.resolve()}'", f"duration {max(end - start, 0.05):.3f}"]
         if i % 200 == 0:
             print(f"\r  кадры {i + 1}/{len(cues)}", end="", flush=True)
@@ -684,7 +715,7 @@ def build_video(audio_path: Path, cues: list, spans: list, total: float, cover, 
     subprocess.run([
         "ffmpeg", "-y", "-loglevel", "error", "-stats", "-f", "concat", "-safe", "0", "-i", str(concat_path),
         "-i", str(audio_path), "-map", "0:v", "-map", "1:a", "-r", str(VIDEO_FPS),
-        "-c:v", "h264_videotoolbox", "-b:v", "400k", "-pix_fmt", "yuv420p", "-c:a", "copy",
+        *video_encoder_args(), "-pix_fmt", "yuv420p", "-c:a", "copy",
         "-shortest", "-movflags", "+faststart", str(out_path),
     ], check=True)
     shutil.rmtree(frames_dir, ignore_errors=True)
