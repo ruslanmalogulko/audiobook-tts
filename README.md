@@ -93,6 +93,9 @@ Runs can be resumed. Every synthesized sentence is cached in `output/<book>/cach
 | `--out` | Output directory, default `output/` |
 | `--no-accents` | Skip stress marking (faster, less accurate) |
 | `--model` | Silero model, default `v5_ru` |
+| `--rate 90%` | Speech rate via SSML `<prosody>` (default `100%`) |
+| `--comma-pause 250` | Extra pause in ms after commas; 1.5× after `;` `:`, 2× between sentences (default off) |
+| `--tts-rate 24000` | Synthesize at 24 kHz instead of 48 kHz, resampled to 48 kHz (default 48000) |
 | `--engine f5` | Experimental F5-TTS engine, see below |
 
 ## How it works
@@ -151,6 +154,8 @@ These were decided by blind listening tests on a real 6.5-hour book:
 - **Silero v5 over F5-TTS.** Listeners rated Silero at least as good. In a Whisper check per sentence, F5 had ~5-7% word errors against ~1% for Silero, and it ran 30-60× slower.
 - **The `ffmpeg` studio filter over a neural enhancer.** Among four blind variants (raw, studio filter, studio + light room reverb, `resemble-enhance`), the plain studio filter won. It processes a whole book in minutes; the neural enhancer would take ~13 hours.
 - **Default voices:** narrator `eugene`, male lines `aidar`, female lines `kseniya`.
+- **Default pace, no extra pauses.** Slower rate (90%) and SSML pauses on commas (200-250 ms) lost a blind test to the plain output, so they stay opt-in flags.
+- **Studio filter also on headphones.** A softer filter (no high boost, 5-9 kHz cut) and 24 kHz synthesis lost a headphone blind test. The slight metallic tint is Silero's vocoder itself.
 - **Pillow frames instead of `ffmpeg` subtitle filters:** Homebrew's `ffmpeg` is built without libass, and drawing frames gives full control over typography.
 
 ## Limitations

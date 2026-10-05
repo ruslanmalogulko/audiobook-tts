@@ -302,7 +302,8 @@ def split_chunks(paragraph: str, limit: int = MAX_CHUNK_CHARS):
 # ---------- синтез ----------
 
 class Narrator:
-    def __init__(self, model_id: str, speaker: str, cache_dir: Path, use_accents: bool):
+    def __init__(self, model_id: str, speaker: str, cache_dir: Path, use_accents: bool, tts_rate: int = SAMPLE_RATE,
+                 rate: str = "100%", comma_pause_ms: int = 0):
         import torch
 
         self.torch = torch
@@ -310,7 +311,12 @@ class Narrator:
             "snakers4/silero-models", "silero_tts", language="ru", speaker=model_id, trust_repo=True, verbose=False
         )
         self.model_id, self.speaker = model_id, speaker
-        self.cache_tag = model_id
+        self.tts_rate = tts_rate  # Silero умеет 8/24/48 кГц; на 48 вокодер звенит сильнее
+        self.cache_tag = model_id if tts_rate == SAMPLE_RATE else f"{model_id}@{tts_rate}"
+        # темп и паузы через SSML: Silero сам по себе почти не держит паузу на запятых
+        self.rate, self.comma_pause_ms = rate, comma_pause_ms
+        if rate != "100%" or comma_pause_ms:
+            self.cache_tag += f"|rate={rate}|comma={comma_pause_ms}"
         self.cache_dir = cache_dir
         cache_dir.mkdir(parents=True, exist_ok=True)
         self.accentizer = None
@@ -340,10 +346,30 @@ class Narrator:
         np.save(cached, audio)
         return audio
 
+    def to_ssml(self, chunk: str) -> str:
+        text = chunk.replace("&", " и ")
+        if self.comma_pause_ms:
+            comma, clause, sentence = self.comma_pause_ms, int(self.comma_pause_ms * 1.5), self.comma_pause_ms * 2
+            text = re.sub(r",\s+", f', <break time="{comma}ms"/> ', text)
+            text = re.sub(r"([;:])\s+", rf'\1 <break time="{clause}ms"/> ', text)
+            text = re.sub(r"([.!?…])\s+(?=\S)", rf'\1 <break time="{sentence}ms"/> ', text)
+        if self.rate != "100%":
+            text = f'<prosody rate="{self.rate}">{text}</prosody>'
+        return f"<speak>{text}</speak>"
+
     def synthesize(self, chunk: str, speaker: str) -> np.ndarray:
+        use_ssml = self.rate != "100%" or self.comma_pause_ms
         with self.torch.no_grad():
-            audio = self.model.apply_tts(text=chunk, speaker=speaker, sample_rate=SAMPLE_RATE)
-        return audio.numpy().astype(np.float32)
+            if use_ssml:
+                audio = self.model.apply_tts(ssml_text=self.to_ssml(chunk), speaker=speaker, sample_rate=self.tts_rate)
+            else:
+                audio = self.model.apply_tts(text=chunk, speaker=speaker, sample_rate=self.tts_rate)
+        audio = audio.numpy().astype(np.float32)
+        if self.tts_rate != SAMPLE_RATE:
+            from scipy.signal import resample_poly
+
+            audio = resample_poly(audio, SAMPLE_RATE, self.tts_rate).astype(np.float32)
+        return audio
 
 
 F5_REPO = "Misha24-10/F5-TTS_RUSSIAN"
@@ -774,6 +800,10 @@ def main():
     parser.add_argument("epub", type=Path)
     parser.add_argument("--out", type=Path, default=Path("output"))
     parser.add_argument("--model", default="v5_ru", help="модель Silero")
+    parser.add_argument("--rate", default="100%", help="темп речи Silero в процентах, например 90%%")
+    parser.add_argument("--comma-pause", type=int, default=0, help="пауза на запятых, мс (на ;: в 1,5 раза, между предложениями в 2)")
+    parser.add_argument("--tts-rate", type=int, choices=[24000, 48000], default=48000,
+                        help="частота синтеза Silero (результат всё равно 48 кГц)")
     parser.add_argument("--engine", choices=["silero", "f5"], default="silero")
     parser.add_argument("--f5-checkpoint", choices=sorted(F5_CHECKPOINTS), default="v2")
     parser.add_argument("--f5-steps", type=int, default=32, help="шаги F5: меньше - быстрее, хуже (16-32)")
@@ -805,7 +835,8 @@ def main():
         narrator = F5Narrator(args.model, args.speaker, work / "cache", not args.no_accents, args.f5_checkpoint,
                                args.f5_steps)
     else:
-        narrator = Narrator(args.model, args.speaker, work / "cache", use_accents=not args.no_accents)
+        narrator = Narrator(args.model, args.speaker, work / "cache", not args.no_accents, args.tts_rate,
+                            args.rate, args.comma_pause)
 
     voices = None
     if args.male_voice or args.female_voice:
